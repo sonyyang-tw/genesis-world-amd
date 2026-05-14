@@ -55,12 +55,14 @@ def _camera_pose(step_i, cruise_steps, approach_steps, side):
     cruise_end_pos = (x_outro, drive_y - 0.2, drive_z + 0.1)
     cruise_end_look = (x_cruise_end, 0.0, look_z)
 
-    # Final overhead hero pose: tight hover above the centre env's lifted
-    # arm. Each Franka's gripper sits ~0.65 m in +x from its base so the
-    # visual centre of the centre robot is at world (~0.3, 0, ~0.3) — point
-    # the lookat there, with the camera shifted slightly south so we don't
-    # gimbal-lock straight down.
-    overhead_pos = (0.3, -0.5, 1.7)
+    # Final overhead hero pose: tight hover above env 24 (the centre env,
+    # at world origin for a 7x7 grid centred on (0,0)). The lookat is
+    # offset to the *arm midpoint* — each Franka extends ~0.65 m in +x
+    # toward its bottle, so aiming at (0.3, 0, 0.3) puts the centre
+    # robot's whole body (base → gripper) horizontally across image
+    # centre instead of dangling off to the right. Camera is shifted
+    # slightly south of the lookat so up=+Z stays well-defined.
+    overhead_pos = (0.3, -0.5, 1.5)
     overhead_look = (0.3, 0.0, 0.3)
 
     if step_i < cruise_steps:
@@ -343,6 +345,14 @@ def main():
             motion_end = phase_total + last_row_offset
             cam_end = CAM_TOTAL if use_dynamic_cam else 0
             TOTAL = max(motion_end, cam_end)
+
+            # Anchor every env's PD controller to the initial standing qpos
+            # *before* the staggered dispatch starts. Otherwise rows that
+            # haven't been activated yet (`t_local < 0`) have no commanded
+            # target and slowly collapse under gravity, which read as a
+            # row-by-row "fall over" intro on the recording.
+            init_target = franka.get_qpos()
+            franka.control_dofs_position(init_target)
 
             zeros_2 = np.zeros((1, 2), dtype=gs.np_float)
             lift_force = np.full((1, 2), -20.0, dtype=gs.np_float)
