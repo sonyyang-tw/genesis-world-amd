@@ -23,7 +23,7 @@ def main():
     parser.add_argument("--ckpt", type=int, default=100)
     args = parser.parse_args()
 
-    gs.init(backend=gs.cpu)
+    gs.init(backend=gs.amdgpu)
 
     log_dir = f"logs/{args.exp_name}"
     with open(f"logs/{args.exp_name}/cfgs.pkl", "rb") as f:

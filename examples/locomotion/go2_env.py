@@ -13,7 +13,7 @@ def gs_rand(lower, upper, batch_shape):
 
 
 class Go2Env:
-    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False):
+    def __init__(self, num_envs, env_cfg, obs_cfg, reward_cfg, command_cfg, show_viewer=False, camera_kwargs=None):
         self.num_envs: int = num_envs
         self.num_actions = env_cfg["num_actions"]
         self.cfg = env_cfg
@@ -71,6 +71,11 @@ class Go2Env:
                 quat=self.env_cfg["base_init_quat"],
             ),
         )
+
+        # optional offscreen camera (must be added before scene.build())
+        self.cam = None
+        if camera_kwargs is not None:
+            self.cam = self.scene.add_camera(**camera_kwargs)
 
         # build
         self.scene.build(n_envs=num_envs)

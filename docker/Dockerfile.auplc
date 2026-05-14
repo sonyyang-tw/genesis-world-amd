@@ -22,6 +22,7 @@ RUN pip install --no-cache-dir \
     "numba>=0.61" \
     loguru omegaconf gstaichi \
     "genesis-world==0.4.6" \
+    tensordict \
     stable-baselines3
 
 RUN mkdir -p /opt/workspace/genesis-world && \

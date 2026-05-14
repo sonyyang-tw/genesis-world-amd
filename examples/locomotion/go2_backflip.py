@@ -107,9 +107,24 @@ class BackflipEnv(Go2Env):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp_name", type=str, default="single")
+    parser.add_argument("-r", "--record", action="store_true", help="Record an offscreen camera to mp4.")
+    parser.add_argument("-o", "--video", type=str, default=None, help="Output video path (implies --record).")
+    parser.add_argument("--no-viewer", action="store_true", help="Run headless (no on-screen viewer window).")
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="Number of env steps to run. Defaults to ~2 episodes when recording, infinite otherwise.",
+    )
+    parser.add_argument("--res", type=int, nargs=2, default=(1280, 720), help="Recording resolution (W H).")
     args = parser.parse_args()
 
-    gs.init()
+    if args.video is not None:
+        args.record = True
+    if args.record and args.video is None:
+        args.video = f"go2_backflip_{args.exp_name}.mp4"
+
+    gs.init(backend=gs.amdgpu)
 
     env_cfg, obs_cfg, reward_cfg, command_cfg = get_cfgs()
 
@@ -120,30 +135,69 @@ def main():
     else:
         raise RuntimeError
 
+    camera_kwargs = None
+    if args.record:
+        camera_kwargs = dict(
+            res=tuple(args.res),
+            pos=(2.5, 1.5, 1.2),
+            lookat=(0.0, 0.0, 0.3),
+            fov=40,
+            GUI=False,
+        )
+
     env = BackflipEnv(
         num_envs=1,
         env_cfg=env_cfg,
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
-        show_viewer=True,
+        show_viewer=not args.no_viewer,
+        camera_kwargs=camera_kwargs,
     )
+
+    if args.record:
+        env.cam.follow_entity(env.robot, fix_orientation=False)
 
     policy = torch.jit.load(f"./backflip/{args.exp_name}.pt")
     policy.to(device=gs.device)
 
-    obs, _ = env.reset()
-    with torch.no_grad():
-        while True:
-            actions = policy(obs)
-            obs, rews, dones, infos = env.step(actions)
+    fps = int(round(1.0 / env.dt))
+    if args.steps is None:
+        if args.record:
+            args.steps = 2 * env.max_episode_length
+        else:
+            args.steps = -1
+
+    if args.record:
+        env.cam.start_recording()
+
+    obs = env.reset()
+    try:
+        with torch.no_grad():
+            step_i = 0
+            while args.steps < 0 or step_i < args.steps:
+                actions = policy(obs)
+                obs, rews, dones, infos = env.step(actions)
+                if args.record:
+                    env.cam.render()
+                step_i += 1
+    except KeyboardInterrupt:
+        print("Interrupted, finalizing recording...")
+    finally:
+        if args.record:
+            env.cam.stop_recording(save_to_filename=args.video, fps=fps)
+            print(f"Saved video to {args.video}")
 
 
 if __name__ == "__main__":
     main()
 
 """
-# evaluation
+# evaluation (on-screen viewer)
 python examples/locomotion/go2_backflip.py -e single
 python examples/locomotion/go2_backflip.py -e double
+
+# evaluation (record to mp4, no viewer)
+python examples/locomotion/go2_backflip.py -e single  --record --no-viewer
+python examples/locomotion/go2_backflip.py -e double  --record --no-viewer -o backflip_double.mp4
 """
