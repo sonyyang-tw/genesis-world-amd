@@ -1,6 +1,6 @@
 import genesis as gs
 
-gs.init(backend=gs.cpu)
+gs.init(backend=gs.amdgpu)
 
 scene = gs.Scene()
 

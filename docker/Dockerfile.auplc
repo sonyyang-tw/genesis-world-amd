@@ -1,0 +1,31 @@
+ARG BASE_IMAGE=ghcr.io/amdresearch/auplc-base:latest
+FROM ${BASE_IMAGE}
+
+USER root
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg cmake build-essential \
+        libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+        libgbm1 libglib2.0-0 \
+        libvulkan1 mesa-vulkan-drivers vulkan-tools \
+        speech-dispatcher && \
+    rm -rf /var/lib/apt/lists/*
+
+# Genesis AMDGPU JIT requires ld.lld on PATH
+RUN ln -sf /opt/rocm/lib/llvm/bin/ld.lld /usr/local/bin/ld.lld
+
+# Genesis stack — numpy <2.4 avoids MJCF scalar breakage; numba >=0.61 for GPU kernels
+# Pinned to the same versions used by the lerobot image so behaviour matches.
+RUN pip install --no-cache-dir \
+    "numpy>=1.26.4,<2.4" \
+    "numba>=0.61" \
+    loguru omegaconf gstaichi \
+    "genesis-world==0.4.6" \
+    stable-baselines3
+
+RUN mkdir -p /opt/workspace/genesis-world && \
+    chown -R jovyan:1000 /opt/workspace/genesis-world
+
+USER jovyan
+WORKDIR /opt/workspace/genesis-world
