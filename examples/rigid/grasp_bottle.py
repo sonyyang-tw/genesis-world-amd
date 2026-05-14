@@ -33,34 +33,59 @@ def _cam_start_x(side):
     return side * 0.6
 
 
-def _drive_past_pose(step_i, total, side):
-    """Slow horizontal drive-past, starting at the old-version's "sec 8" pose.
+def _camera_pose(step_i, cruise_steps, approach_steps, side):
+    """Two-phase cinematic camera path:
 
-    Camera glides along +x at the south edge of the grid; lookat tracks the
-    same x at grid centre so the view is *truly horizontal* (no pitch). Up
-    stays +Z so the floor / horizon stay parallel.
+    1. Slow horizontal drive-past from the side-on "old sec 8" position out
+       past the +x edge of the grid (camera up=+Z, no pitch, no roll).
+    2. Smooth arc up and inward to a top-down hero shot of the centre env.
+
+    `cruise_steps` is the number of sim steps for phase 1, `approach_steps`
+    for phase 2. After both phases the camera holds the overhead pose.
     """
-    t = min(1.0, step_i / max(1, total))
-
     drive_y = -side - 0.6     # only ~0.6 m beyond the south row — close
     drive_z = 0.7             # ~at the top of the Franka body
-    look_y = 0.0
     look_z = 0.7              # SAME as drive_z → horizontal (parallel to floor)
 
     x_start = _cam_start_x(side)        # ≈ old "second 8" position
     x_cruise_end = side + 1.0           # 1 m past the last column
     x_outro = x_cruise_end + 0.3        # tiny pull-back at the very end
 
-    pos_keys = [
-        (0.00, (x_start,      drive_y,       drive_z)),
-        (0.96, (x_cruise_end, drive_y,       drive_z)),
-        (1.00, (x_outro,      drive_y - 0.2, drive_z + 0.1)),
-    ]
-    look_keys = [
-        (0.00, (x_start,      look_y, look_z)),
-        (0.96, (x_cruise_end, look_y, look_z)),
-        (1.00, (x_cruise_end, look_y, look_z)),
-    ]
+    # End-of-cruise / start-of-approach pose (shared between phases).
+    cruise_end_pos = (x_outro, drive_y - 0.2, drive_z + 0.1)
+    cruise_end_look = (x_cruise_end, 0.0, look_z)
+
+    # Final overhead hero pose: tight hover above the centre env's lifted
+    # arm. Each Franka's gripper sits ~0.65 m in +x from its base so the
+    # visual centre of the centre robot is at world (~0.3, 0, ~0.3) — point
+    # the lookat there, with the camera shifted slightly south so we don't
+    # gimbal-lock straight down.
+    overhead_pos = (0.3, -0.5, 1.7)
+    overhead_look = (0.3, 0.0, 0.3)
+
+    if step_i < cruise_steps:
+        t = step_i / max(1, cruise_steps)
+        pos_keys = [
+            (0.00, (x_start,      drive_y, drive_z)),
+            (0.96, (x_cruise_end, drive_y, drive_z)),
+            (1.00, cruise_end_pos),
+        ]
+        look_keys = [
+            (0.00, (x_start,      0.0, look_z)),
+            (0.96, (x_cruise_end, 0.0, look_z)),
+            (1.00, cruise_end_look),
+        ]
+    else:
+        s = min(1.0, (step_i - cruise_steps) / max(1, approach_steps))
+        pos_keys = [
+            (0.00, cruise_end_pos),
+            (1.00, overhead_pos),
+        ]
+        look_keys = [
+            (0.00, cruise_end_look),
+            (1.00, overhead_look),
+        ]
+        t = s
     return _interp_keyframes(pos_keys, t), _interp_keyframes(look_keys, t)
 
 
@@ -94,6 +119,12 @@ def main():
         type=float,
         default=14.0,
         help="Drive-past duration in seconds (larger = slower camera).",
+    )
+    parser.add_argument(
+        "--approach-duration",
+        type=float,
+        default=5.0,
+        help="Time (seconds) to arc from drive-past end into the overhead hero shot.",
     )
     args = parser.parse_args()
 
@@ -223,6 +254,8 @@ def main():
     DT = 0.01
     ROW_DELAY = max(1, int(round(args.row_delay / DT)))
     CAM_DUR = max(1, int(round(args.cam_duration / DT)))
+    APPROACH_DUR = max(0, int(round(args.approach_duration / DT)))
+    CAM_TOTAL = CAM_DUR + APPROACH_DUR
     use_dynamic_cam = args.record and not args.static_cam
     step_counter = [0]
 
@@ -231,8 +264,8 @@ def main():
         if cam is None:
             return
         if use_dynamic_cam:
-            cs = min(step_counter[0], CAM_DUR)
-            pos, lookat = _drive_past_pose(cs, CAM_DUR, grid_half)
+            cs = min(step_counter[0], CAM_TOTAL)
+            pos, lookat = _camera_pose(cs, CAM_DUR, APPROACH_DUR, grid_half)
             # Always re-pin world up to +Z so the camera never inherits roll
             # from the previous transform (set_pose without `up` falls back
             # to the stored Y-axis, which can be slightly oblique).
@@ -308,7 +341,7 @@ def main():
 
             last_row_offset = (n_rows - 1) * ROW_DELAY
             motion_end = phase_total + last_row_offset
-            cam_end = CAM_DUR if use_dynamic_cam else 0
+            cam_end = CAM_TOTAL if use_dynamic_cam else 0
             TOTAL = max(motion_end, cam_end)
 
             zeros_2 = np.zeros((1, 2), dtype=gs.np_float)
