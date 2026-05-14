@@ -25,7 +25,7 @@ From the repo root:
 
 ```bash
 cd docker
-docker build -f Dockerfile.amdgpu -t genesis-world-amd .   # or Dockerfile.auplc
+docker build -f Dockerfile.auplc -t genesis-world-amd .
 ./run.sh
 ```
 
