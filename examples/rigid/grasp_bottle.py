@@ -22,32 +22,44 @@ def _interp_keyframes(keys, t):
     return keys[-1][1]
 
 
-def _drive_past_pose(step_i, total, side):
-    """Drive-past the grid at eye level — like a car cruising close to the row.
+def _cam_start_x(side):
+    """X position the camera occupies at t=0 of the drive-past.
 
-    Camera glides along the +x axis just outside the -y row of envs; lookat
-    stays at the same z as the camera so the view is *truly horizontal*
-    (floor lines parallel, no pitch). Camera up is +Z so roll stays at 0.
+    Chosen to roughly match where the *previous* version of this script had
+    the camera at second 8 — i.e. already past the centre of the grid, with
+    the row of robots filling the right half of the frame. From here the
+    camera continues outward (+x) slowly.
+    """
+    return side * 0.6
+
+
+def _drive_past_pose(step_i, total, side):
+    """Slow horizontal drive-past, starting at the old-version's "sec 8" pose.
+
+    Camera glides along +x at the south edge of the grid; lookat tracks the
+    same x at grid centre so the view is *truly horizontal* (no pitch). Up
+    stays +Z so the floor / horizon stay parallel.
     """
     t = min(1.0, step_i / max(1, total))
 
     drive_y = -side - 0.6     # only ~0.6 m beyond the south row — close
     drive_z = 0.7             # ~at the top of the Franka body
-    look_y = 0.0              # back into the centre column
+    look_y = 0.0
     look_z = 0.7              # SAME as drive_z → horizontal (parallel to floor)
-    sweep = side + 0.3        # only stick out ~0.3 m past the corner envs
+
+    x_start = _cam_start_x(side)        # ≈ old "second 8" position
+    x_cruise_end = side + 1.0           # 1 m past the last column
+    x_outro = x_cruise_end + 0.3        # tiny pull-back at the very end
 
     pos_keys = [
-        (0.00, (-sweep - 0.2, drive_y - 0.2, drive_z + 0.1)),
-        (0.06, (-sweep,        drive_y,       drive_z)),
-        (0.90, ( sweep,        drive_y,       drive_z)),
-        (1.00, ( sweep + 0.2,  drive_y - 0.2, drive_z + 0.1)),
+        (0.00, (x_start,      drive_y,       drive_z)),
+        (0.96, (x_cruise_end, drive_y,       drive_z)),
+        (1.00, (x_outro,      drive_y - 0.2, drive_z + 0.1)),
     ]
     look_keys = [
-        (0.00, (-sweep + 0.2, look_y, look_z)),
-        (0.06, (-sweep,        look_y, look_z)),
-        (0.90, ( sweep,        look_y, look_z)),
-        (1.00, ( sweep,        look_y, look_z)),
+        (0.00, (x_start,      look_y, look_z)),
+        (0.96, (x_cruise_end, look_y, look_z)),
+        (1.00, (x_cruise_end, look_y, look_z)),
     ]
     return _interp_keyframes(pos_keys, t), _interp_keyframes(look_keys, t)
 
@@ -70,6 +82,18 @@ def main():
         "--static-cam",
         action="store_true",
         help="Disable the drive-past trajectory and use a fixed wide-angle camera (legacy).",
+    )
+    parser.add_argument(
+        "--row-delay",
+        type=float,
+        default=0.6,
+        help="Stagger row start times by this many seconds (each y-line of envs starts later).",
+    )
+    parser.add_argument(
+        "--cam-duration",
+        type=float,
+        default=14.0,
+        help="Drive-past duration in seconds (larger = slower camera).",
     )
     args = parser.parse_args()
 
@@ -131,11 +155,16 @@ def main():
     n_per_row = max(1, math.ceil(math.sqrt(max(args.n_envs, 1))))
     grid_half = max(1.0, (n_per_row - 1) / 2.0)
     if args.record:
-        radius = max(4.0, grid_half * 2.0)
+        # Initial camera = first keyframe of the drive-past (so there is no
+        # establishing-to-cruise cut). Matches what the previous build of
+        # this script showed at second 8.
+        x_start = _cam_start_x(grid_half)
+        cam_init_pos = (x_start, -grid_half - 0.6, 0.7)
+        cam_init_look = (x_start, 0.0, 0.7)
         cam = scene.add_camera(
             res=tuple(args.res),
-            pos=(radius, -radius, max(4.0, grid_half * 1.5)),
-            lookat=(0.0, 0.0, 0.3),
+            pos=cam_init_pos,
+            lookat=cam_init_look,
             fov=45,
             GUI=False,
         )
@@ -191,72 +220,134 @@ def main():
     )
 
     ########################## sim-step + camera helper ##########################
-    step_counter = [0]
-    # Rough length of the scripted sequence; used to time the camera trajectory.
-    # plan_path waypoints are unknown until plan_path() returns, so we add it
-    # in once we have it.
-    cam_total = [30 + 100 + 100 + 1000]  # 1230 fixed + plan_path
+    DT = 0.01
+    ROW_DELAY = max(1, int(round(args.row_delay / DT)))
+    CAM_DUR = max(1, int(round(args.cam_duration / DT)))
     use_dynamic_cam = args.record and not args.static_cam
+    step_counter = [0]
 
-    def step(n: int = 1):
-        for _ in range(n):
-            scene.step()
-            if cam is not None:
-                if use_dynamic_cam:
-                    pos, lookat = _drive_past_pose(step_counter[0], cam_total[0], grid_half)
-                    # Always re-pin world up to +Z so the camera never inherits
-                    # roll from the previous transform (set_pose without `up`
-                    # falls back to the stored Y-axis, which can be oblique).
-                    cam.set_pose(pos=pos, lookat=lookat, up=(0.0, 0.0, 1.0))
-                cam.render()
-            step_counter[0] += 1
+    def render_cam_only():
+        """Advance the recording camera by one frame (with optional drive-past)."""
+        if cam is None:
+            return
+        if use_dynamic_cam:
+            cs = min(step_counter[0], CAM_DUR)
+            pos, lookat = _drive_past_pose(cs, CAM_DUR, grid_half)
+            # Always re-pin world up to +Z so the camera never inherits roll
+            # from the previous transform (set_pose without `up` falls back
+            # to the stored Y-axis, which can be slightly oblique).
+            cam.set_pose(pos=pos, lookat=lookat, up=(0.0, 0.0, 1.0))
+        cam.render()
+
+    def tick_one():
+        scene.step()
+        render_cam_only()
+        step_counter[0] += 1
 
     if cam is not None:
         cam.start_recording()
 
     try:
-        # move to pre-grasp pose
-        qpos = franka.inverse_kinematics(
-            link=end_effector,
-            pos=with_offset([0.65, 0.0, 0.25]),
-            quat=grasp_quat,
-        )
-        qpos[..., -2:] = 0.04
+        if args.n_envs == 0:
+            # ----- single-env path: keep the original scripted sequence -----
+            qpos = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.25]), quat=grasp_quat,
+            )
+            qpos[..., -2:] = 0.04
+            for waypoint in franka.plan_path(qpos):
+                franka.control_dofs_position(waypoint)
+                tick_one()
+            for _ in range(30):
+                tick_one()
+            qpos = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.142]), quat=grasp_quat,
+            )
+            franka.control_dofs_position(qpos[..., :-2], motors_dof)
+            for _ in range(100):
+                tick_one()
+            franka.control_dofs_position(qpos[..., :-2], motors_dof)
+            franka.control_dofs_position(np.array([0, 0]), fingers_dof)
+            for _ in range(100):
+                tick_one()
+            qpos = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.3]), quat=grasp_quat,
+            )
+            franka.control_dofs_position(qpos[..., :-2], motors_dof)
+            franka.control_dofs_force(np.array([-20, -20]), fingers_dof)
+            for _ in range(1000):
+                tick_one()
+        else:
+            # ----- multi-env path: pre-compute IK + plan_path, then dispatch -----
+            # one row at a time so the wave staggers across the grid.
+            qpos_pre = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.25]), quat=grasp_quat,
+            )
+            qpos_pre[..., -2:] = 0.04
+            qpos_reach = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.142]), quat=grasp_quat,
+            )
+            qpos_lift = franka.inverse_kinematics(
+                link=end_effector, pos=with_offset([0.65, 0.0, 0.3]), quat=grasp_quat,
+            )
+            plan_waypoints = list(franka.plan_path(qpos_pre))
 
-        path = franka.plan_path(qpos)
-        cam_total[0] += len(path)  # include plan_path length in the trajectory budget
-        for waypoint in path:
-            franka.control_dofs_position(waypoint)
-            step()
-        step(30)
+            PLAN_LEN = len(plan_waypoints)
+            DWELL, REACH, GRASP, LIFT = 30, 100, 100, 1000
+            phase_total = PLAN_LEN + DWELL + REACH + GRASP + LIFT
 
-        # reach
-        qpos = franka.inverse_kinematics(
-            link=end_effector,
-            pos=with_offset([0.65, 0.0, 0.142]),
-            quat=grasp_quat,
-        )
-        franka.control_dofs_position(qpos[..., :-2], motors_dof)
-        step(100)
+            # With env_spacing=(1, 1) and the row-major layout
+            #   offset_x = (env_idx // n_per_row) * sx
+            #   offset_y = (env_idx % n_per_row) * sy
+            # envs sharing the same `env_idx % n_per_row` lie on the same y-line,
+            # i.e. they look like one horizontal row from the camera's POV.
+            env_indices = np.arange(args.n_envs)
+            n_rows = n_per_row
+            envs_per_row = [
+                env_indices[(env_indices % n_per_row) == r] for r in range(n_rows)
+            ]
 
-        # grasp
-        franka.control_dofs_position(qpos[..., :-2], motors_dof)
-        franka.control_dofs_position(
-            np.array([0, 0]) if args.n_envs == 0 else np.array([[0, 0]] * args.n_envs), fingers_dof
-        )  # you can use position control
-        step(100)
+            last_row_offset = (n_rows - 1) * ROW_DELAY
+            motion_end = phase_total + last_row_offset
+            cam_end = CAM_DUR if use_dynamic_cam else 0
+            TOTAL = max(motion_end, cam_end)
 
-        # lift
-        qpos = franka.inverse_kinematics(
-            link=end_effector,
-            pos=with_offset([0.65, 0.0, 0.3]),
-            quat=grasp_quat,
-        )
-        franka.control_dofs_position(qpos[..., :-2], motors_dof)
-        franka.control_dofs_force(
-            np.array([-20, -20]) if args.n_envs == 0 else np.array([[-20, -20]] * args.n_envs), fingers_dof
-        )  # can also use force control
-        step(1000)
+            zeros_2 = np.zeros((1, 2), dtype=gs.np_float)
+            lift_force = np.full((1, 2), -20.0, dtype=gs.np_float)
+
+            for t in range(TOTAL):
+                for r in range(n_rows):
+                    eidx = envs_per_row[r]
+                    if eidx.size == 0:
+                        continue
+                    t_local = t - r * ROW_DELAY
+                    if t_local < 0:
+                        continue  # row not active yet — stays at initial qpos
+                    if t_local < PLAN_LEN:
+                        wp = plan_waypoints[t_local]
+                        franka.control_dofs_position(wp[eidx], envs_idx=eidx)
+                    elif t_local < PLAN_LEN + DWELL:
+                        franka.control_dofs_position(qpos_pre[eidx], envs_idx=eidx)
+                    elif t_local < PLAN_LEN + DWELL + REACH:
+                        franka.control_dofs_position(
+                            qpos_reach[eidx, :-2], motors_dof, envs_idx=eidx,
+                        )
+                    elif t_local < PLAN_LEN + DWELL + REACH + GRASP:
+                        franka.control_dofs_position(
+                            qpos_reach[eidx, :-2], motors_dof, envs_idx=eidx,
+                        )
+                        franka.control_dofs_position(
+                            np.broadcast_to(zeros_2, (eidx.size, 2)),
+                            fingers_dof, envs_idx=eidx,
+                        )
+                    else:  # in lift or hold-after-lift
+                        franka.control_dofs_position(
+                            qpos_lift[eidx, :-2], motors_dof, envs_idx=eidx,
+                        )
+                        franka.control_dofs_force(
+                            np.broadcast_to(lift_force, (eidx.size, 2)),
+                            fingers_dof, envs_idx=eidx,
+                        )
+                tick_one()
     except KeyboardInterrupt:
         print("Interrupted, finalizing recording...")
     finally:
