@@ -127,7 +127,7 @@ def main():
     parser.add_argument(
         "--cam-duration",
         type=float,
-        default=14.0,
+        default=8.0,
         help="Drive-past duration in seconds (larger = slower camera).",
     )
     parser.add_argument(
