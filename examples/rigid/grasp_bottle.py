@@ -23,69 +23,76 @@ def _interp_keyframes(keys, t):
 
 
 def _cam_start_x(side):
-    """X position the camera occupies at t=0 of the drive-past.
+    """X position the camera holds throughout the trajectory.
 
-    Chosen to roughly match where the *previous* version of this script had
-    the camera at second 8 — i.e. already past the centre of the grid, with
-    the row of robots filling the right half of the frame. From here the
-    camera continues outward (+x) slowly.
+    Pinned at +1.8 — this matches where the ORIGINAL drive-past camera
+    was at second 8 of the early version of this script. From this POV
+    the visually-centre foreground robot is env 38 (world (2, 0)),
+    NOT env 24 (world (0, 0) — that one reads as a left-corner robot
+    when viewed from x=1.8).
     """
-    return side * 0.6
+    return 1.8
+
+
+# Index of the env whose arm sits visually in the centre of the cruise
+# frame when the camera looks due north from x=1.8. With a 7x7 grid
+# centred on (0, 0) the columns sit at world x ∈ {-3..+3}, and x=1.8
+# lands halfway between env 31 (world x=1) and env 38 (world x=2);
+# env 38's BASE is the closer of the two, so its body dominates the
+# centre of the frame and the camera converges onto it.
+HERO_ENV_WORLD_XY = (2.0, 0.0)
 
 
 def _camera_pose(step_i, cruise_steps, approach_steps, side):
-    """Two-phase cinematic camera path:
+    """Two-phase cinematic camera path (camera x is pinned at 1.8):
 
-    1. Slow horizontal drive-past from the side-on "old sec 8" position out
-       past the +x edge of the grid (camera up=+Z, no pitch, no roll).
-    2. Smooth arc up and inward to a top-down hero shot of the centre env.
+    1. Slow southward→inward dolly: camera glides north (+y) at constant
+       x=1.8 and z=0.7, optical axis horizontal. Establishing shot of the
+       grid from the south.
+    2. Approach: continues +y, rises to z=1.2, and tilts down so the
+       lookat lands on env 38's arm midpoint — a 3/4 oblique hero shot
+       of the visually-centre robot (NOT env 24).
 
     `cruise_steps` is the number of sim steps for phase 1, `approach_steps`
-    for phase 2. After both phases the camera holds the overhead pose.
+    for phase 2. After both phases the camera holds the oblique pose.
     """
-    drive_y = -side - 0.6     # only ~0.6 m beyond the south row — close
-    drive_z = 0.7             # ~at the top of the Franka body
-    look_z = 0.7              # SAME as drive_z → horizontal (parallel to floor)
+    cam_x = _cam_start_x(side)        # locked at 1.8 throughout
+    drive_z = 0.7                     # ~at the top of the Franka body
+    look_z = drive_z                  # horizontal during cruise
+    drive_y_start = -side - 0.6       # far south, well clear of the grid
+    drive_y_end = -side + 1.0         # 1 m inside the south edge
 
-    x_start = _cam_start_x(side)        # ≈ old "second 8" position
-    x_cruise_end = side + 1.0           # 1 m past the last column
-    x_outro = x_cruise_end + 0.3        # tiny pull-back at the very end
+    cruise_end_pos = (cam_x, drive_y_end, drive_z)
+    cruise_end_look = (cam_x, 0.0, look_z)
 
-    # End-of-cruise / start-of-approach pose (shared between phases).
-    cruise_end_pos = (x_outro, drive_y - 0.2, drive_z + 0.1)
-    cruise_end_look = (x_cruise_end, 0.0, look_z)
-
-    # Final overhead hero pose: tight hover above env 24 (the centre env,
-    # at world origin for a 7x7 grid centred on (0,0)). The lookat is
-    # offset to the *arm midpoint* — each Franka extends ~0.65 m in +x
-    # toward its bottle, so aiming at (0.3, 0, 0.3) puts the centre
-    # robot's whole body (base → gripper) horizontally across image
-    # centre instead of dangling off to the right. Camera is shifted
-    # slightly south of the lookat so up=+Z stays well-defined.
-    overhead_pos = (0.3, -0.5, 1.5)
-    overhead_look = (0.3, 0.0, 0.3)
+    # Final hero pose: oblique close-up of env 38 (the foreground centre
+    # robot when looking north from x=1.8). Camera at ~40° elevation,
+    # slightly east-of and south-of env 38's base, lookat at the arm
+    # midpoint so the body sweeps diagonally across image centre.
+    hx, hy = HERO_ENV_WORLD_XY
+    arm_mid_x = hx + 0.3              # base->gripper midpoint along +x
+    oblique_pos = (hx + 0.15, hy - 1.0, 1.2)
+    oblique_look = (arm_mid_x, hy, 0.3)
 
     if step_i < cruise_steps:
         t = step_i / max(1, cruise_steps)
         pos_keys = [
-            (0.00, (x_start,      drive_y, drive_z)),
-            (0.96, (x_cruise_end, drive_y, drive_z)),
+            (0.00, (cam_x, drive_y_start, drive_z)),
             (1.00, cruise_end_pos),
         ]
         look_keys = [
-            (0.00, (x_start,      0.0, look_z)),
-            (0.96, (x_cruise_end, 0.0, look_z)),
+            (0.00, (cam_x, 0.0, look_z)),
             (1.00, cruise_end_look),
         ]
     else:
         s = min(1.0, (step_i - cruise_steps) / max(1, approach_steps))
         pos_keys = [
             (0.00, cruise_end_pos),
-            (1.00, overhead_pos),
+            (1.00, oblique_pos),
         ]
         look_keys = [
             (0.00, cruise_end_look),
-            (1.00, overhead_look),
+            (1.00, oblique_look),
         ]
         t = s
     return _interp_keyframes(pos_keys, t), _interp_keyframes(look_keys, t)
