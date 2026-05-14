@@ -23,24 +23,32 @@ def _interp_keyframes(keys, t):
 
 
 def _drive_past_pose(step_i, total, side):
-    """Cinematic camera trajectory: establish -> drive past +x side -> pull back."""
+    """Drive-past the grid at eye level — like a car cruising past a row of robots.
+
+    Camera glides along the +x axis on the -y side of the grid; lookat sits in
+    the grid centre at table height. Camera up is +Z and roll stays at 0, so
+    the floor / horizon line in the rendered frame is always horizontal.
+    The pitch is mild (~10°) so the view feels parallel to the ground.
+    """
     t = min(1.0, step_i / max(1, total))
-    far = max(6.0, side * 1.4)
+
+    drive_y = -side - 1.8     # ~1.8 m beyond the south row
+    drive_z = 1.2             # eye level (driver-seat height)
+    look_y = 0.0              # back into the centre column
+    look_z = 0.5              # table / arm-base height
+    sweep = side + 1.0        # half-length of the slide along x
+
     pos_keys = [
-        (0.00, (far + 2.0, -far - 2.0, far)),
-        (0.15, (far - 0.5, -side - 1.5, side)),
-        (0.20, (far - 1.0, -side - 1.0, 1.6)),
-        (0.75, (far - 1.0, side + 1.0, 1.6)),
-        (0.85, (far + 1.0, side + 2.0, side)),
-        (1.00, (far + 2.0, far + 2.0, far - 1.0)),
+        (0.00, (-sweep - 0.3, drive_y - 0.4, drive_z + 0.2)),
+        (0.08, (-sweep,        drive_y,       drive_z)),
+        (0.85, ( sweep,        drive_y,       drive_z)),
+        (1.00, ( sweep + 0.3,  drive_y - 0.4, drive_z + 0.2)),
     ]
     look_keys = [
-        (0.00, (0.3, 0.0, 0.5)),
-        (0.15, (0.3, 0.0, 0.4)),
-        (0.20, (0.3, -side + 1.0, 0.4)),
-        (0.75, (0.3, side - 1.0, 0.4)),
-        (0.85, (0.3, 0.0, 0.6)),
-        (1.00, (0.3, 0.0, 0.6)),
+        (0.00, (-sweep + 0.3, look_y, look_z)),
+        (0.08, (-sweep,        look_y, look_z)),
+        (0.85, ( sweep,        look_y, look_z)),
+        (1.00, ( sweep,        look_y, look_z + 0.1)),
     ]
     return _interp_keyframes(pos_keys, t), _interp_keyframes(look_keys, t)
 
@@ -97,8 +105,16 @@ def main():
     )
 
     ########################## entities ##########################
+    # Use the analytical Plane (no z-fighting flicker) with a wood-grain
+    # diffuse texture from Genesis's bundled assets so the floor reads as
+    # a single uniform showroom surface across all envs.
     plane = scene.add_entity(
-        gs.morphs.URDF(file="urdf/plane/plane.urdf", fixed=True),
+        morph=gs.morphs.Plane(),
+        surface=gs.surfaces.Rough(
+            diffuse_texture=gs.textures.ImageTexture(
+                image_path="meshes/wooden_sphere_OBJ/wood_Mat_Diffuse.png",
+            ),
+        ),
     )
     bottle = scene.add_entity(
         material=gs.materials.Rigid(rho=300),
