@@ -23,32 +23,31 @@ def _interp_keyframes(keys, t):
 
 
 def _drive_past_pose(step_i, total, side):
-    """Drive-past the grid at eye level — like a car cruising past a row of robots.
+    """Drive-past the grid at eye level — like a car cruising close to the row.
 
-    Camera glides along the +x axis on the -y side of the grid; lookat sits in
-    the grid centre at table height. Camera up is +Z and roll stays at 0, so
-    the floor / horizon line in the rendered frame is always horizontal.
-    The pitch is mild (~10°) so the view feels parallel to the ground.
+    Camera glides along the +x axis just outside the -y row of envs; lookat
+    stays at the same z as the camera so the view is *truly horizontal*
+    (floor lines parallel, no pitch). Camera up is +Z so roll stays at 0.
     """
     t = min(1.0, step_i / max(1, total))
 
-    drive_y = -side - 1.8     # ~1.8 m beyond the south row
-    drive_z = 1.2             # eye level (driver-seat height)
+    drive_y = -side - 0.6     # only ~0.6 m beyond the south row — close
+    drive_z = 0.7             # ~at the top of the Franka body
     look_y = 0.0              # back into the centre column
-    look_z = 0.5              # table / arm-base height
-    sweep = side + 1.0        # half-length of the slide along x
+    look_z = 0.7              # SAME as drive_z → horizontal (parallel to floor)
+    sweep = side + 0.3        # only stick out ~0.3 m past the corner envs
 
     pos_keys = [
-        (0.00, (-sweep - 0.3, drive_y - 0.4, drive_z + 0.2)),
-        (0.08, (-sweep,        drive_y,       drive_z)),
-        (0.85, ( sweep,        drive_y,       drive_z)),
-        (1.00, ( sweep + 0.3,  drive_y - 0.4, drive_z + 0.2)),
+        (0.00, (-sweep - 0.2, drive_y - 0.2, drive_z + 0.1)),
+        (0.06, (-sweep,        drive_y,       drive_z)),
+        (0.90, ( sweep,        drive_y,       drive_z)),
+        (1.00, ( sweep + 0.2,  drive_y - 0.2, drive_z + 0.1)),
     ]
     look_keys = [
-        (0.00, (-sweep + 0.3, look_y, look_z)),
-        (0.08, (-sweep,        look_y, look_z)),
-        (0.85, ( sweep,        look_y, look_z)),
-        (1.00, ( sweep,        look_y, look_z + 0.1)),
+        (0.00, (-sweep + 0.2, look_y, look_z)),
+        (0.06, (-sweep,        look_y, look_z)),
+        (0.90, ( sweep,        look_y, look_z)),
+        (1.00, ( sweep,        look_y, look_z)),
     ]
     return _interp_keyframes(pos_keys, t), _interp_keyframes(look_keys, t)
 
@@ -105,16 +104,12 @@ def main():
     )
 
     ########################## entities ##########################
-    # Use the analytical Plane (no z-fighting flicker) with a wood-grain
-    # diffuse texture from Genesis's bundled assets so the floor reads as
-    # a single uniform showroom surface across all envs.
+    # Analytical infinite plane with a flat mid-gray surface (no diffuse
+    # texture, so the floor reads as truly uniform out to the horizon
+    # instead of a finite textured rug + a stripe of default plane).
     plane = scene.add_entity(
         morph=gs.morphs.Plane(),
-        surface=gs.surfaces.Rough(
-            diffuse_texture=gs.textures.ImageTexture(
-                image_path="meshes/wooden_sphere_OBJ/wood_Mat_Diffuse.png",
-            ),
-        ),
+        surface=gs.surfaces.Rough(color=(0.55, 0.55, 0.55, 1.0)),
     )
     bottle = scene.add_entity(
         material=gs.materials.Rigid(rho=300),
@@ -209,7 +204,10 @@ def main():
             if cam is not None:
                 if use_dynamic_cam:
                     pos, lookat = _drive_past_pose(step_counter[0], cam_total[0], grid_half)
-                    cam.set_pose(pos=pos, lookat=lookat)
+                    # Always re-pin world up to +Z so the camera never inherits
+                    # roll from the previous transform (set_pose without `up`
+                    # falls back to the stored Y-axis, which can be oblique).
+                    cam.set_pose(pos=pos, lookat=lookat, up=(0.0, 0.0, 1.0))
                 cam.render()
             step_counter[0] += 1
 
