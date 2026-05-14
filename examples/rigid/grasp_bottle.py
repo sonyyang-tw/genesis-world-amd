@@ -1,9 +1,15 @@
 import argparse
 import math
+import os
 
 import numpy as np
 
 import genesis as gs
+
+
+# All recordings land in examples/videos/ (sibling of examples/rigid/).
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+VIDEOS_DIR = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "videos"))
 
 
 def _interp_keyframes(keys, t):
@@ -141,7 +147,9 @@ def main():
     if args.video is not None:
         args.record = True
     if args.record and args.video is None:
-        args.video = f"grasp_bottle_n{args.n_envs}.mp4"
+        args.video = os.path.join(VIDEOS_DIR, f"grasp_bottle_n{args.n_envs}.mp4")
+    if args.video is not None:
+        os.makedirs(os.path.dirname(os.path.abspath(args.video)), exist_ok=True)
 
     ########################## init ##########################
     gs.init(backend=gs.amdgpu)
@@ -352,7 +360,12 @@ def main():
             last_row_offset = (n_rows - 1) * ROW_DELAY
             motion_end = phase_total + last_row_offset
             cam_end = CAM_TOTAL if use_dynamic_cam else 0
-            TOTAL = max(motion_end, cam_end)
+            # When recording with the dynamic camera, stop the sim as soon as
+            # the camera trajectory completes — rear rows that haven't reached
+            # their lift target by then are clipped intentionally so the video
+            # ends on the hero pose instead of holding it for several extra
+            # seconds while the wave finishes off-camera.
+            TOTAL = cam_end if use_dynamic_cam else motion_end
 
             # Anchor every env's PD controller to the initial standing qpos
             # *before* the staggered dispatch starts. Otherwise rows that
