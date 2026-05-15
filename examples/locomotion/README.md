@@ -21,61 +21,19 @@ Tested on Ryzen AI MAX (Radeon 8060S, 96 GB VRAM) inside the
 All four `gs.init(...)` entry points use `backend=gs.amdgpu` so they pick up the
 ROCm path automatically.
 
-## Quick start: run the tutorial notebook in your browser
+---
 
-Download the backflip checkpoints first (see [§2](#2-get-the-backflip-checkpoints)),
-then launch a JupyterLab server inside the prebuilt ROCm image:
-
-```bash
-# from the repo root
-docker rm -f gw-notebook 2>/dev/null
-docker run -d --name gw-notebook \
-  --privileged --group-add dialout --group-add video \
-  --ipc=host --shm-size=8g \
-  --device=/dev/kfd --device=/dev/dri \
-  -p 8888:8888 \
-  -v "$(pwd)":/opt/workspace/genesis-world \
-  -w /opt/workspace/genesis-world/examples/locomotion \
-  -e JUPYTER_TOKEN=backflip \
-  genesis-world-amd:latest \
-  jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
-    --ServerApp.token=backflip --ServerApp.password='' \
-    --ServerApp.root_dir=/opt/workspace/genesis-world
-```
-
-Then open:
-
-<http://127.0.0.1:8888/lab/tree/examples/locomotion/go2_backflip_tutorial.ipynb?token=backflip>
-
-Stream the logs / stop the server with:
-
-```bash
-docker logs -f gw-notebook     # watch the JupyterLab logs
-docker stop gw-notebook        # stop the server
-docker rm   gw-notebook        # remove the container
-```
-
-> If you don't have `genesis-world-amd:latest` yet, build it first — see
-> [§1](#1-build--enter-the-container).
-
-The notebook walks through nine pedagogical sections — Genesis init, env /
-obs / cmd configs, phase-aware observation override, scene build, policy load,
-rollout + recording, and inline video playback. Just **Run All** once the URL
-opens.
-
-## 1. Build & enter the container
+## 1. Build the docker image
 
 From the repo root:
 
 ```bash
-cd docker
-docker build -f Dockerfile.auplc -t genesis-world-amd .
-./run.sh
+docker build -f docker/Dockerfile.auplc -t genesis-world-amd:latest .
 ```
 
-`run.sh` mounts the repo into `/opt/workspace/genesis-world` and forwards
-`/dev/kfd` + `/dev/dri`. Inside the container the locomotion folder is at
-`/opt/workspace/genesis-world/examples/locomotion`.
+This produces the `genesis-world-amd:latest` image with Genesis 0.4.6,
+PyTorch 2.9.1+rocm7.11.0, JupyterLab 4.5, and all the ROCm GL/EGL libs the
+notebook needs. Build takes ~10 min the first time.
 
 ## 2. Get the backflip checkpoints
 
@@ -95,23 +53,62 @@ examples/locomotion/backflip/
 └── readme.md
 ```
 
-## 3. Run the backflip demo
+## 3. Run — `docker run` launches the notebook
 
-`go2_backflip.py` and the notebook both read `./backflip/<exp>.pt` as a
-**relative path**, so always run them from `examples/locomotion/`:
+From the repo root, this single command spins up the container, mounts the
+repo, forwards the GPU, and starts JupyterLab on port **8888** with the
+tutorial notebook ready to open:
 
 ```bash
+docker rm -f gw-notebook 2>/dev/null
+docker run -d --name gw-notebook \
+  --privileged --group-add dialout --group-add video \
+  --ipc=host --shm-size=8g \
+  --device=/dev/kfd --device=/dev/dri \
+  -p 8888:8888 \
+  -v "$(pwd)":/opt/workspace/genesis-world \
+  -w /opt/workspace/genesis-world/examples/locomotion \
+  genesis-world-amd:latest \
+  jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root \
+    --ServerApp.token=backflip --ServerApp.password='' \
+    --ServerApp.root_dir=/opt/workspace/genesis-world
+```
+
+Now open the notebook in your browser:
+
+<http://127.0.0.1:8888/lab/tree/examples/locomotion/go2_backflip_tutorial.ipynb?token=backflip>
+
+Hit **Run All** — the notebook walks through nine pedagogical sections
+(Genesis init → cfgs → phase-aware observation override → scene build → policy
+load → rollout + recording → inline video playback). The last cell embeds the
+recorded MP4 right inside the notebook. Toggle the `exp_name` cell between
+`"single"` and `"double"` to switch policies and re-run.
+
+Stream the logs / stop the server with:
+
+```bash
+docker logs -f gw-notebook     # watch the JupyterLab logs
+docker stop gw-notebook        # stop the server
+docker rm   gw-notebook        # remove the container
+```
+
+> Want a shell inside the running container instead of the notebook?
+> `docker exec -it gw-notebook bash` puts you in `examples/locomotion/`
+> with the same env, ready to run any of the CLI variants in §4.
+
+## 4. CLI variants of `go2_backflip.py`
+
+If you'd rather skip JupyterLab and drive the script directly, exec into the
+container (or any container built from the same image) and run the script.
+`go2_backflip.py` reads `./backflip/<exp>.pt` as a **relative path**, so always
+run it from `examples/locomotion/`.
+
+```bash
+docker exec -it gw-notebook bash
 cd /opt/workspace/genesis-world/examples/locomotion
 ```
 
-### A) Tutorial notebook (recommended)
-
-Open `go2_backflip_tutorial.ipynb` via the JupyterLab server from
-[Quick start](#quick-start-run-the-tutorial-notebook-in-your-browser) and
-**Run All**. The last cell embeds the recorded MP4 inline. Toggle the
-`exp_name` cell between `"single"` and `"double"` to switch policies.
-
-### B) On-screen viewer (default CLI)
+### A) On-screen viewer (default)
 
 Needs a display / EGL context. Inside a desktop session or with X11 forwarded:
 
@@ -123,7 +120,7 @@ python3 go2_backflip.py -e double   # 3 s episode
 Press `Ctrl+C` in the terminal to exit (the script loops forever by default
 when not recording).
 
-### C) Headless mp4 recording (recommended on remote / SSH boxes)
+### B) Headless mp4 recording (recommended on remote / SSH boxes)
 
 ```bash
 # Single backflip → ./go2_backflip_single.mp4
@@ -140,7 +137,7 @@ Defaults when `--record` is enabled:
 - runs for `2 * episode_length` (single ≈ 200 frames / 4 s, double ≈ 300 frames / 6 s)
 - output FPS = 50 (matches `dt=0.02`)
 
-### D) All CLI flags
+### C) All CLI flags
 
 ```text
 -e/--exp_name {single,double}   which policy to load   [default: single]
@@ -152,18 +149,18 @@ Defaults when `--record` is enabled:
 --res W H                       recording resolution (pixels)
 ```
 
-### E) Custom shots
+### D) Custom shots
 
 ```bash
 # 1080p, 6 s of single backflip
 python3 go2_backflip.py -e single --record --no-viewer --res 1920 1080 --steps 300
 
-# headless + record, both at once for a comparison reel
+# both policies, back-to-back, for a comparison reel
 python3 go2_backflip.py -e single --record --no-viewer -o single.mp4
 python3 go2_backflip.py -e double --record --no-viewer -o double.mp4
 ```
 
-## 4. Training / Eval (walking policy)
+## 5. Training / Eval (walking policy)
 
 Walking uses `rsl-rl-lib`. Inside the container:
 
@@ -185,7 +182,7 @@ python3 go2_eval.py -e go2-walking --ckpt 100
 the same pattern as `go2_backflip.py` can be applied (extend `Go2Env` via
 `camera_kwargs`, then `env.cam.start_recording()` / `render()` / `stop_recording()`).
 
-## 5. Troubleshooting
+## 6. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
@@ -198,7 +195,7 @@ the same pattern as `go2_backflip.py` can be applied (extend `Go2Env` via
 | `port is already allocated` when starting `gw-notebook` | Another container is on `8888`. Run `docker rm -f gw-notebook` or change `-p 8888:8888` to `-p 8889:8888` (then visit `http://127.0.0.1:8889/...`). |
 | `ModuleNotFoundError: go2_env` in the notebook | Make sure you opened the notebook from `examples/locomotion/`. Cell 2 prepends `os.getcwd()` to `sys.path`, but only if the notebook was launched from that directory. |
 
-## 6. Related
+## 7. Related
 
 - Upstream backflip training code (domain randomization, reference rewards):
   <https://github.com/ziyanx02/Genesis-backflip>
