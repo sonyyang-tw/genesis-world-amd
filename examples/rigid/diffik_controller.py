@@ -1,22 +1,35 @@
 """Differential IK (Jacobian-pseudoinverse) controller demo on AMDGPU.
 
-A UR5e or Panda arm tracks a circular trajectory above a static
-workpiece — think welding a circular seam on a metal flange, or
-applying a bead of sealant around a circular feature on a panel.
+Sealant-dispensing application: a UR5e (or Panda) traces a circular
+seam around a hatch lid on a metal panel and lays down a continuous
+bead of sealant — the kind of pass you'd see on an aircraft access
+panel, an automotive engine cover, or a pressure-vessel hatch.
 
-The controller is damped-least-squares pseudoinverse IK applied to
-the 6x6 Jacobian; gravity and collisions are disabled so the demo
-isolates the controller behaviour.
+Scene anatomy
+-------------
+- ``fuselage_panel``  : large aluminium panel (the "skin" the hatch
+                       is bolted into).
+- ``hatch_lid``       : a slightly raised circular lid (Cylinder).
+- ``bead_markers``    : 72 free-floating spheres pre-spawned below
+                       the floor and revealed one-by-one as the
+                       robot's tool tip passes over them, so the
+                       sealant bead actually grows during the
+                       first orbit.
+- ``nozzle``          : a thin brass-coloured cylinder kinematically
+                       teleported to the robot's tool tip every
+                       step — looks like a sealant-gun nozzle.
+
+Controller
+----------
+Damped-least-squares pseudoinverse IK on the 6x6 Jacobian. Gravity
+and collisions are disabled so the demo isolates the controller's
+tracking behaviour from physics interactions.
 
 The robot is *pre-positioned* at the trajectory start with a single
 inverse_kinematics() call before the tracking loop begins, so the
-opening frame is stable instead of the arm whipping in from its
-default rest pose.
+opening frame is calm instead of the arm whipping in from rest.
 
-The static "weld bead" markers (small bright spheres laid along the
-seam) make the industrial intent of the demo immediately readable.
-
-CLI matches grasp_bottle / suction_cup conventions:
+CLI mirrors grasp_bottle / suction_cup:
     --record / -o / --res / --robot / --orbits
 
 Output mp4 lands in `examples/videos/` by default.
@@ -41,18 +54,34 @@ CONFIG = {
 
 # Trajectory parameters: target orbits a small circle in the X-Y plane
 # at this fixed centre/altitude.
-TRAJ_CENTER = np.array([0.5, 0.0, 0.5])
+TRAJ_CENTER = np.array([0.5, 0.0, 0.50])
 TRAJ_RADIUS = 0.10
 TRAJ_QUAT = np.array([0.0, 1.0, 0.0, 0.0])  # tool pointing -z
 
-# Workpiece sits just under the trajectory plane so the seam appears
-# to sit on the part's top face.
-WORKPIECE_SIZE = (0.26, 0.20, 0.04)
-WORKPIECE_CENTER = (TRAJ_CENTER[0], TRAJ_CENTER[1], TRAJ_CENTER[2] - 0.05)
+# --- workpiece geometry (all metres) ----------------------------------
+# Big aluminium panel under the seam (the "fuselage skin").
+PANEL_SIZE = (0.50, 0.40, 0.06)
+PANEL_CENTER = (TRAJ_CENTER[0], TRAJ_CENTER[1], 0.42)
+PANEL_TOP_Z = PANEL_CENTER[2] + PANEL_SIZE[2] / 2  # = 0.45
 
-# Number of "weld-bead" markers laid along the trajectory.
-N_BEAD_MARKERS = 48
-BEAD_RADIUS = 0.006
+# Raised circular hatch lid sitting on top of the panel.
+HATCH_RADIUS = 0.085
+HATCH_HEIGHT = 0.025
+HATCH_CENTER = (TRAJ_CENTER[0], TRAJ_CENTER[1], PANEL_TOP_Z + HATCH_HEIGHT / 2)
+
+# Sealant bead just outside the hatch perimeter, sitting on the panel.
+# 72 spheres on a 0.10 m circle → ~8.7 mm spacing; render radius 10 mm
+# so the spheres overlap into a continuous bead instead of looking like
+# separate dots.
+BEAD_RADIUS_VIS = 0.010
+BEAD_Z = PANEL_TOP_Z + BEAD_RADIUS_VIS         # so beads rest on panel top
+N_BEAD_MARKERS = 72
+HIDDEN_Z = -10.0                               # parking spot below floor
+
+# Tool nozzle attached to the EE — its bottom tip should sit ~1 mm
+# above the bead z so it reads as "actively dispensing".
+NOZZLE_HEIGHT = 0.045
+NOZZLE_RADIUS = 0.006
 
 SIM_DT_DEFAULT = 0.01
 DAMPING = 1e-4
@@ -68,6 +97,16 @@ def _trajectory_point(theta):
     return TRAJ_CENTER + np.array(
         [np.cos(theta), np.sin(theta), 0.0]
     ) * TRAJ_RADIUS
+
+
+def _bead_position(k):
+    """Resting position of the k-th sealant bead marker on the panel."""
+    theta_k = 2.0 * np.pi * k / N_BEAD_MARKERS
+    return np.array([
+        TRAJ_CENTER[0] + np.cos(theta_k) * TRAJ_RADIUS,
+        TRAJ_CENTER[1] + np.sin(theta_k) * TRAJ_RADIUS,
+        BEAD_Z,
+    ])
 
 
 def main():
@@ -104,8 +143,8 @@ def main():
     # ----- scene -----
     scene = gs.Scene(
         viewer_options=gs.options.ViewerOptions(
-            camera_pos=(1.1, -1.4, 0.95),
-            camera_lookat=(0.4, 0.0, 0.5),
+            camera_pos=(1.10, -0.70, 0.78),
+            camera_lookat=(0.50, 0.0, 0.46),
             camera_fov=42,
             max_FPS=200,
         ),
@@ -129,42 +168,64 @@ def main():
         gs.morphs.MJCF(file=robot_config["mjcf_file"]),
     )
 
-    # Static metal-look workpiece — the "part" the robot is welding /
-    # sealing / inspecting around.
-    workpiece = scene.add_entity(
+    # ----- workpiece: aluminium "fuselage" panel -----
+    fuselage_panel = scene.add_entity(
         morph=gs.morphs.Box(
-            size=WORKPIECE_SIZE,
-            pos=WORKPIECE_CENTER,
+            size=PANEL_SIZE,
+            pos=PANEL_CENTER,
             fixed=True,
             collision=False,
         ),
-        surface=gs.surfaces.Rough(color=(0.50, 0.52, 0.58, 1.0)),
+        surface=gs.surfaces.Rough(color=(0.62, 0.64, 0.68, 1.0)),
     )
 
-    # Pre-laid "weld bead" markers along the seam — gives an obvious
-    # visual cue of what trajectory the robot is following and what an
-    # industrial application would look like (welding, sealant
-    # dispensing, glue laying, edge finishing, ...).
+    # Raised circular hatch lid bolted into the panel
+    hatch_lid = scene.add_entity(
+        morph=gs.morphs.Cylinder(
+            radius=HATCH_RADIUS,
+            height=HATCH_HEIGHT,
+            pos=HATCH_CENTER,
+            fixed=True,
+            collision=False,
+        ),
+        surface=gs.surfaces.Rough(color=(0.18, 0.20, 0.26, 1.0)),
+    )
+
+    # ----- sealant bead: free-floating spheres parked below the floor.
+    # We'll teleport each one up to its panel-top position the moment
+    # the robot's tool tip passes over its angular slot — i.e. the bead
+    # actually grows during the first orbit instead of being pre-laid.
+    bead_markers = []
     for k in range(N_BEAD_MARKERS):
-        theta_k = 2.0 * np.pi * k / N_BEAD_MARKERS
-        scene.add_entity(
+        bead = scene.add_entity(
             morph=gs.morphs.Sphere(
-                radius=BEAD_RADIUS,
-                pos=tuple(_trajectory_point(theta_k)),
-                fixed=True,
+                radius=BEAD_RADIUS_VIS,
+                pos=(TRAJ_CENTER[0], TRAJ_CENTER[1], HIDDEN_Z),
                 collision=False,
             ),
-            surface=gs.surfaces.Plastic(color=(1.0, 0.30, 0.05, 1.0)),
+            surface=gs.surfaces.Plastic(color=(0.97, 0.42, 0.06, 1.0)),
         )
+        bead_markers.append(bead)
 
-    # Visual axis marker that we'll teleport to the IK target each step.
-    # Marked collision=False so the engine skips convex-decomposition on
-    # the axis arrow mesh (it crashed during decomp on AMDGPU and the
-    # marker is purely visual anyway).
+    # ----- nozzle: a thin brass cylinder kinematically pinned to the EE.
+    # It's a free body (collision off, gravity is already off scene-wide)
+    # so we can `set_pos` / `set_quat` it every step.
+    nozzle = scene.add_entity(
+        morph=gs.morphs.Cylinder(
+            radius=NOZZLE_RADIUS,
+            height=NOZZLE_HEIGHT,
+            pos=(TRAJ_CENTER[0], TRAJ_CENTER[1], TRAJ_CENTER[2] - NOZZLE_HEIGHT / 2),
+            collision=False,
+        ),
+        surface=gs.surfaces.Plastic(color=(0.85, 0.65, 0.20, 1.0)),
+    )
+
+    # Tiny axis marker overlaid on the IK target — keeps the controller
+    # signal visible without being the dominant visual.
     target_entity = scene.add_entity(
         gs.morphs.Mesh(
             file="meshes/axis.obj",
-            scale=0.08,
+            scale=0.05,
             collision=False,
         ),
         surface=gs.surfaces.Default(color=(1.0, 0.5, 0.5, 1.0)),
@@ -174,8 +235,8 @@ def main():
     if args.record:
         cam = scene.add_camera(
             res=tuple(args.res),
-            pos=(1.1, -1.4, 0.95),
-            lookat=(0.4, 0.0, 0.5),
+            pos=(1.10, -0.70, 0.78),
+            lookat=(0.50, 0.0, 0.46),
             fov=42,
             GUI=False,
         )
@@ -200,7 +261,24 @@ def main():
     robot.set_qpos(qpos_start)
     robot.control_dofs_position(qpos_start.cpu().numpy())
     target_entity.set_qpos(np.concatenate([start_target, TRAJ_QUAT]))
+
+    # Pin the nozzle to the EE before the very first frame so it
+    # appears already attached in the opening still.
+    def _pin_nozzle_to_ee():
+        ee_pos_now = ee_link.get_pos().cpu().numpy()
+        nozzle.set_pos(np.array([
+            float(ee_pos_now[0]),
+            float(ee_pos_now[1]),
+            float(ee_pos_now[2]) - NOZZLE_HEIGHT / 2,
+        ]))
+        try:
+            nozzle.set_dofs_velocity([0.0] * 6)
+        except Exception:
+            pass
+
+    _pin_nozzle_to_ee()
     scene.step()
+    _pin_nozzle_to_ee()
 
     if cam is not None:
         cam.start_recording()
@@ -208,13 +286,35 @@ def main():
     try:
         # Brief stationary opening beat so the still frame at t=0 is calm
         for _ in range(20):
+            _pin_nozzle_to_ee()
             scene.step()
             if cam is not None:
                 cam.render()
 
+        n_revealed = 0  # bead markers already lifted into place
         for i in range(n_steps):
             theta = i / 360.0 * np.pi
             target_pos = _trajectory_point(theta)
+
+            # Progressively lay down the sealant bead during orbit 1.
+            # Each marker k corresponds to angular slot 2π·k/N in the
+            # CURRENT orbit; we reveal the marker once the tool tip has
+            # passed over its slot.
+            if i < STEPS_PER_ORBIT:
+                deposited_angle = theta % (2.0 * np.pi)
+            else:
+                deposited_angle = 2.0 * np.pi
+            target_revealed = min(
+                N_BEAD_MARKERS,
+                int(np.ceil(deposited_angle / (2.0 * np.pi) * N_BEAD_MARKERS)),
+            )
+            while n_revealed < target_revealed:
+                bead_markers[n_revealed].set_pos(_bead_position(n_revealed))
+                try:
+                    bead_markers[n_revealed].set_dofs_velocity([0.0] * 6)
+                except Exception:
+                    pass
+                n_revealed += 1
 
             target_entity.set_qpos(np.concatenate([target_pos, TRAJ_QUAT]))
 
@@ -229,6 +329,7 @@ def main():
             q = robot.get_qpos().cpu().numpy() + dq
 
             robot.control_dofs_position(q)
+            _pin_nozzle_to_ee()
             scene.step()
             if cam is not None:
                 cam.render()
