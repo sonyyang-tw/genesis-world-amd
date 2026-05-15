@@ -1,9 +1,20 @@
 """Differential IK (Jacobian-pseudoinverse) controller demo on AMDGPU.
 
-A UR5e or Panda arm tracks a small circular trajectory in the X-Y
-plane using damped-least-squares pseudoinverse IK applied to the
-6x6 Jacobian. Gravity and collisions are disabled so the demo
+A UR5e or Panda arm tracks a circular trajectory above a static
+workpiece — think welding a circular seam on a metal flange, or
+applying a bead of sealant around a circular feature on a panel.
+
+The controller is damped-least-squares pseudoinverse IK applied to
+the 6x6 Jacobian; gravity and collisions are disabled so the demo
 isolates the controller behaviour.
+
+The robot is *pre-positioned* at the trajectory start with a single
+inverse_kinematics() call before the tracking loop begins, so the
+opening frame is stable instead of the arm whipping in from its
+default rest pose.
+
+The static "weld bead" markers (small bright spheres laid along the
+seam) make the industrial intent of the demo immediately readable.
 
 CLI matches grasp_bottle / suction_cup conventions:
     --record / -o / --res / --robot / --orbits
@@ -32,7 +43,16 @@ CONFIG = {
 # at this fixed centre/altitude.
 TRAJ_CENTER = np.array([0.5, 0.0, 0.5])
 TRAJ_RADIUS = 0.10
-TRAJ_QUAT = np.array([0.0, 1.0, 0.0, 0.0])  # gripper pointing -z
+TRAJ_QUAT = np.array([0.0, 1.0, 0.0, 0.0])  # tool pointing -z
+
+# Workpiece sits just under the trajectory plane so the seam appears
+# to sit on the part's top face.
+WORKPIECE_SIZE = (0.26, 0.20, 0.04)
+WORKPIECE_CENTER = (TRAJ_CENTER[0], TRAJ_CENTER[1], TRAJ_CENTER[2] - 0.05)
+
+# Number of "weld-bead" markers laid along the trajectory.
+N_BEAD_MARKERS = 48
+BEAD_RADIUS = 0.006
 
 SIM_DT_DEFAULT = 0.01
 DAMPING = 1e-4
@@ -41,6 +61,13 @@ DAMPING = 1e-4
 # → period (one full orbit) = 720 steps. We keep that and let the
 # user choose how many orbits to render.
 STEPS_PER_ORBIT = 720
+
+
+def _trajectory_point(theta):
+    """Position of the IK target at parameter ``theta`` (radians)."""
+    return TRAJ_CENTER + np.array(
+        [np.cos(theta), np.sin(theta), 0.0]
+    ) * TRAJ_RADIUS
 
 
 def main():
@@ -102,6 +129,34 @@ def main():
         gs.morphs.MJCF(file=robot_config["mjcf_file"]),
     )
 
+    # Static metal-look workpiece — the "part" the robot is welding /
+    # sealing / inspecting around.
+    workpiece = scene.add_entity(
+        morph=gs.morphs.Box(
+            size=WORKPIECE_SIZE,
+            pos=WORKPIECE_CENTER,
+            fixed=True,
+            collision=False,
+        ),
+        surface=gs.surfaces.Rough(color=(0.50, 0.52, 0.58, 1.0)),
+    )
+
+    # Pre-laid "weld bead" markers along the seam — gives an obvious
+    # visual cue of what trajectory the robot is following and what an
+    # industrial application would look like (welding, sealant
+    # dispensing, glue laying, edge finishing, ...).
+    for k in range(N_BEAD_MARKERS):
+        theta_k = 2.0 * np.pi * k / N_BEAD_MARKERS
+        scene.add_entity(
+            morph=gs.morphs.Sphere(
+                radius=BEAD_RADIUS,
+                pos=tuple(_trajectory_point(theta_k)),
+                fixed=True,
+                collision=False,
+            ),
+            surface=gs.surfaces.Plastic(color=(1.0, 0.30, 0.05, 1.0)),
+        )
+
     # Visual axis marker that we'll teleport to the IK target each step.
     # Marked collision=False so the engine skips convex-decomposition on
     # the axis arrow mesh (it crashed during decomp on AMDGPU and the
@@ -109,7 +164,7 @@ def main():
     target_entity = scene.add_entity(
         gs.morphs.Mesh(
             file="meshes/axis.obj",
-            scale=0.10,
+            scale=0.08,
             collision=False,
         ),
         surface=gs.surfaces.Default(color=(1.0, 0.5, 0.5, 1.0)),
@@ -133,15 +188,33 @@ def main():
     diag = DAMPING * np.eye(6)
     n_steps = int(round(args.orbits * STEPS_PER_ORBIT))
 
+    # Pre-position the robot at the trajectory start so the diffik loop
+    # opens with ~zero error; otherwise the very first dq is huge and
+    # the arm whips in from its rest pose.
+    start_target = _trajectory_point(0.0)
+    qpos_start = robot.inverse_kinematics(
+        link=ee_link,
+        pos=start_target,
+        quat=TRAJ_QUAT,
+    )
+    robot.set_qpos(qpos_start)
+    robot.control_dofs_position(qpos_start.cpu().numpy())
+    target_entity.set_qpos(np.concatenate([start_target, TRAJ_QUAT]))
+    scene.step()
+
     if cam is not None:
         cam.start_recording()
 
     try:
+        # Brief stationary opening beat so the still frame at t=0 is calm
+        for _ in range(20):
+            scene.step()
+            if cam is not None:
+                cam.render()
+
         for i in range(n_steps):
             theta = i / 360.0 * np.pi
-            target_pos = TRAJ_CENTER + np.array(
-                [np.cos(theta), np.sin(theta), 0.0]
-            ) * TRAJ_RADIUS
+            target_pos = _trajectory_point(theta)
 
             target_entity.set_qpos(np.concatenate([target_pos, TRAJ_QUAT]))
 
