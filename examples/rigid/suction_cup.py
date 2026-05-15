@@ -59,8 +59,11 @@ BELT_PAD_BACK = 0.40                     # ...and this far back from PICK_X
 
 BIN_X = 0.32
 BIN_Y_OFFSET = BELT_HALF_W + 0.18        # bins sit 18 cm off each side
-BIN_SIZE = 0.18
-BIN_DROP_Z = 0.18                        # release height above bin
+BIN_SIZE = 0.18                          # outer bin footprint (square)
+BIN_WALL_THICK = 0.012
+BIN_WALL_HEIGHT = 0.05                   # short walls so cubes don't roll out
+BIN_BASE_DROP_Z = 0.18                   # hand height for the *first* cube
+BIN_STACK_DH = CUBE_SIZE                 # raise hand by one cube per stacked item
 
 BIN_POS = {
     "red":  (BIN_X, BELT_Y_CENTER - BIN_Y_OFFSET, 0.02),
@@ -241,10 +244,13 @@ def main():
             surface=gs.surfaces.Rough(color=(0.85, 0.65, 0.10, 1.0)),
         )
 
-    # Sort bins (coloured floor pads off either side of the belt)
+    # Sort bins (coloured floor pads + four short walls off either side of
+    # the belt). The walls stop a stacked cube from rolling out if it
+    # doesn't land squarely on the cube already in the bin.
     for color, rgba in (("red", (0.75, 0.15, 0.15, 1.0)),
                        ("blue", (0.15, 0.25, 0.80, 1.0))):
         bx, by, _ = BIN_POS[color]
+        # Bin floor
         scene.add_entity(
             morph=gs.morphs.Box(
                 size=(BIN_SIZE, BIN_SIZE, 0.012),
@@ -253,6 +259,21 @@ def main():
             ),
             surface=gs.surfaces.Rough(color=rgba),
         )
+        # Four perimeter walls
+        wall_z = 0.012 + BIN_WALL_HEIGHT / 2
+        wall_outer = (BIN_SIZE - BIN_WALL_THICK) / 2
+        wall_specs = (
+            # (size, pos)
+            ((BIN_SIZE, BIN_WALL_THICK, BIN_WALL_HEIGHT), (bx, by - wall_outer, wall_z)),
+            ((BIN_SIZE, BIN_WALL_THICK, BIN_WALL_HEIGHT), (bx, by + wall_outer, wall_z)),
+            ((BIN_WALL_THICK, BIN_SIZE, BIN_WALL_HEIGHT), (bx - wall_outer, by, wall_z)),
+            ((BIN_WALL_THICK, BIN_SIZE, BIN_WALL_HEIGHT), (bx + wall_outer, by, wall_z)),
+        )
+        for size, pos in wall_specs:
+            scene.add_entity(
+                morph=gs.morphs.Box(size=size, pos=pos, fixed=True),
+                surface=gs.surfaces.Rough(color=rgba),
+            )
 
     # ----- cubes (free rigid bodies, alternating colour) -----
     # Every cube spawns on the belt so it rests stably under gravity
@@ -334,6 +355,13 @@ def main():
         # Settle a moment so the home pose is stable
         _drive_qpos(franka, qpos_home, 40, scene, cam, args.record, fingers_dof)
 
+        # Per-bin stack counter so each subsequent cube is released
+        # one cube-height higher — otherwise the second red cube would
+        # be released *inside* the first red cube already sitting in
+        # the bin, and the constraint solver would shoot it sideways
+        # out of the bin.
+        bin_stack_count = {"red": 0, "blue": 0}
+
         # ----- main pick & place loop -----
         for idx, cube in enumerate(cubes):
             # 1) Belt advances until this cube reaches the pick station
@@ -368,10 +396,13 @@ def main():
             path_to_bin = franka.plan_path(qpos_goal=qpos_above_bin, num_waypoints=120)
             _execute_path(franka, fingers_dof, path_to_bin, scene, cam, args.record)
 
-            # 6) Lower toward the bin
+            # 6) Lower toward the bin — release height grows with the
+            # stack so the cube is dropped *just above* the previous one
+            stack_idx = bin_stack_count[cube["color"]]
+            release_z = BIN_BASE_DROP_Z + stack_idx * BIN_STACK_DH
             qpos_release = franka.inverse_kinematics(
                 link=end_effector,
-                pos=np.array([bin_pos[0], bin_pos[1], BIN_DROP_Z]),
+                pos=np.array([bin_pos[0], bin_pos[1], release_z]),
                 quat=GRAB_QUAT,
             )
             _drive_qpos(franka, qpos_release, 50, scene, cam, args.record, fingers_dof)
@@ -379,7 +410,11 @@ def main():
             # 7) Release suction → cube falls into the bin under gravity
             rigid_solver.delete_weld_constraint(link_cube, link_franka)
             cube["state"] = "dropped"
-            _drive_qpos(franka, qpos_release, 25, scene, cam, args.record, fingers_dof)
+            bin_stack_count[cube["color"]] += 1
+            # Hold a beat at release height so the cube settles before
+            # the gripper sweeps away (otherwise the lift can drag the
+            # just-dropped cube sideways)
+            _drive_qpos(franka, qpos_release, 35, scene, cam, args.record, fingers_dof)
 
             # 8) Lift away then plan back to the home pose
             _drive_qpos(franka, qpos_above_bin, 40, scene, cam, args.record, fingers_dof)
