@@ -1,0 +1,45 @@
+# Dockerfile.9070xt
+# For AMD Radeon RX 9070 XT / gfx1201
+
+FROM rocm/pytorch:rocm7.2.3_ubuntu24.04_py3.12_pytorch_release_2.9.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROCR_VISIBLE_DEVICES=0
+ENV HIP_VISIBLE_DEVICES=0
+ENV HSA_ENABLE_SDMA=0
+ENV AMD_SERIALIZE_KERNEL=3
+
+USER root
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl wget ffmpeg cmake build-essential \
+    libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+    libgbm1 libglib2.0-0 \
+    libvulkan1 mesa-vulkan-drivers vulkan-tools \
+    speech-dispatcher \
+    python3-pip python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make sure python exists
+RUN ln -sf /usr/bin/python3 /usr/local/bin/python
+
+# Genesis AMDGPU JIT requires ld.lld on PATH
+RUN ln -sf /opt/rocm/llvm/bin/ld.lld /usr/local/bin/ld.lld || true
+RUN ln -sf /opt/rocm/lib/llvm/bin/ld.lld /usr/local/bin/ld.lld || true
+
+# Python packages
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    "numpy>=1.26.4,<2.4" \
+    "numba>=0.61" \
+    loguru omegaconf gstaichi \
+    "genesis-world==0.4.6" \
+    tensordict \
+    stable-baselines3 \
+    jupyterlab notebook ipywidgets \
+    matplotlib imageio imageio-ffmpeg \
+    PyOpenGL==3.1.5
+
+WORKDIR /opt/workspace/genesis-world
+
+CMD ["bash"]
